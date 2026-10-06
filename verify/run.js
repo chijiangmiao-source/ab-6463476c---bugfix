@@ -1,8 +1,9 @@
 // Verify service entry point. Runs once and exits:
 //   1. rule tests (validation, idempotency, conflicts, hash chain)
 //   2. interrupt-recovery drills (crash after each persistence stage)
-//   3. frontend build check
-//   4. page + health HTTP smoke against the web service
+//   3. concurrency acceptance (two connections interleaving submissions)
+//   4. frontend build check
+//   5. page + health HTTP smoke against the web service
 // Exit code 0 = all checks passed, 1 = at least one failure.
 
 import { spawnSync } from "node:child_process";
@@ -13,6 +14,7 @@ import { fileURLToPath } from "node:url";
 
 import { registerRuleTests } from "./tests/rules.test.js";
 import { registerRecoveryTests } from "./tests/recovery.test.js";
+import { registerConcurrencyTests } from "./tests/concurrency.test.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WEB_URL = (process.env.WEB_URL ?? "http://web:8080").replace(/\/$/, "");
@@ -45,6 +47,7 @@ const harness = {
 
 registerRuleTests(harness);
 registerRecoveryTests(harness);
+registerConcurrencyTests(harness);
 
 const results = [];
 

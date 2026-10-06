@@ -48,8 +48,15 @@ export class MemoryStorage {
     return clone(this.backing.manifest);
   }
 
-  async putManifest(record) {
+  // Atomically switch the active manifest, but only if the stored manifest
+  // is still at expectedVersion (compare-and-swap). Several adapters can
+  // share one backing — two pages on one device — so a stale snapshot must
+  // never clobber a manifest a concurrent connection already switched.
+  async switchManifest(expectedVersion, record) {
+    const currentVersion = this.backing.manifest?.version ?? 0;
+    if (currentVersion !== expectedVersion) return false;
     this.backing.manifest = clone(record);
+    return true;
   }
 
   async getMeta(key) {

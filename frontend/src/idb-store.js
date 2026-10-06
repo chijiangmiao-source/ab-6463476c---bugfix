@@ -84,21 +84,25 @@ export class IdbStorage {
     return (await this.#read("manifest", (s) => s.get("active"))) ?? null;
   }
 
-  async putManifest(record) {
-    const current = await this.getManifest();
-    const currentIds = Array.isArray(current?.segmentIds)
-      ? current.segmentIds
-      : [];
-    const incomingIds = Array.isArray(record.segmentIds)
-      ? record.segmentIds
-      : [];
-    const segmentIds = [...new Set([...currentIds, ...incomingIds])];
-    const currentBatches = current?.batches ?? {};
-    const incomingBatches = record.batches ?? {};
-    const batches = { ...currentBatches, ...incomingBatches };
-    const version = Math.max(current?.version ?? 0, record.version ?? 0);
-    const manifest = { ...record, segmentIds, batches, version, id: "active" };
-    await this.#write("manifest", (s) => s.put(manifest));
+  // Atomically switch the active manifest, but only if the stored manifest
+  // is still at expectedVersion (compare-and-swap). The check and the write
+  // share one readwrite transaction, so two pages on this device can never
+  // both switch from the same snapshot: the loser's submission reloads and
+  // rebases instead of merging a discontinuous chain.
+  async switchManifest(expectedVersion, record) {
+    const tx = this.#db.transaction("manifest", "readwrite");
+    const store = tx.objectStore("manifest");
+    const current = await requestToPromise(store.get("active"));
+    if ((current?.version ?? 0) !== expectedVersion) {
+      return false; // nothing written; the transaction commits empty
+    }
+    store.put({ ...record, id: "active" });
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error ?? new Error("transaction aborted"));
+    });
+    return true;
   }
 
   async getMeta(key) {
