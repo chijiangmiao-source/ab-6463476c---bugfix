@@ -52,6 +52,19 @@ export class MemoryStorage {
     this.backing.manifest = clone(record);
   }
 
+  // Compare-and-swap manifest switch: stores `record` only if the currently
+  // stored manifest version still equals `expectedVersion`. The check and
+  // the write happen without an intervening await, so no other connection
+  // can slip a switch in between.
+  async switchManifest(record, expectedVersion) {
+    const currentVersion = this.backing.manifest?.version ?? 0;
+    if (currentVersion !== expectedVersion) {
+      return false;
+    }
+    this.backing.manifest = clone(record);
+    return true;
+  }
+
   async getMeta(key) {
     return clone(this.backing.meta.get(key) ?? null);
   }

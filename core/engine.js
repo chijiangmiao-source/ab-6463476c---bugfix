@@ -22,6 +22,12 @@ export class CrashError extends Error {
 
 const MAX_CONFLICT_LOG = 100;
 
+// How many times one submit may rebuild its intent against a freshly read
+// manifest before giving up. Each retry means another connection switched
+// the manifest first; two reviewers interleaving on one device converge on
+// the second attempt.
+const MAX_SUBMIT_ATTEMPTS = 8;
+
 function emptyManifest() {
   return {
     id: "active",
@@ -36,13 +42,21 @@ function emptyManifest() {
  * Sealing engine. Operates on a storage adapter with this interface:
  *   getPrepare(batchId) / putPrepare(rec) / deletePrepare(batchId) / listPrepares()
  *   getSegment(digest) / putSegment(rec)
- *   getManifest() / putManifest(rec)
+ *   getManifest() / putManifest(rec) / switchManifest(rec, expectedVersion)
  *   getMeta(key) / setMeta(key, value)
  *
  * Persistence protocol for a new batch (each step its own durable write):
  *   1. prepare intent  (prepares store, keyed by batchId)
  *   2. immutable segment (segments store, keyed by its own digest)
  *   3. active manifest switch (manifest store, single "active" record)
+ *
+ * Step 3 is a compare-and-swap on the manifest version: two connections
+ * committing concurrently cannot both switch the manifest. The loser
+ * re-reads the chain, re-checks idempotency/conflict/sequencing and rebinds
+ * its batch to the actual head, so interleaved submits converge to a single
+ * continuous chain and a batch is never reported sealed off a stale chain.
+ * (putManifest is the unconditional replace used by recovery repairs;
+ * switchManifest is the guarded switch used by the submit path.)
  *
  * Only segments pointed to by the active manifest whose digest, predecessor
  * and sequence numbers verify continuously belong to the sealed record.
@@ -97,70 +111,100 @@ export class SealEngine {
     }
     const events = batch.events.map((e) => ({ seq: e.seq, payload: e.payload }));
     const contentHash = await contentHashOf(events);
-    const manifest = await this.#loadManifest();
 
-    // Already published under this batch id?
-    if (Object.hasOwn(manifest.batches, batch.batchId)) {
-      const existing = await this.#storage.getSegment(
-        manifest.batches[batch.batchId]
-      );
-      if (existing && existing.contentHash === contentHash) {
-        // Identical retransmission: hand back the original receipt, append nothing.
-        return { status: "duplicate", receipt: existing.receipt };
-      }
-      // Different content under a published id: keep existing evidence, report.
-      const conflict = {
-        reason: "published-content-mismatch",
-        batchId: batch.batchId,
-        incomingContentHash: contentHash,
-        existingContentHash: existing?.contentHash ?? null,
-        existingReceipt: existing?.receipt ?? null,
-        at: new Date().toISOString(),
-      };
-      await this.#recordConflict(conflict);
-      return { status: "conflict", conflict };
-    }
+    // Another connection (a second review page on the same device) may
+    // commit while this one is mid-protocol. Every decision below is made
+    // against a freshly read manifest, and the manifest switch only lands
+    // if that manifest is still current; otherwise the whole evaluation
+    // restarts against the new head.
+    for (let attempt = 1; attempt <= MAX_SUBMIT_ATTEMPTS; attempt += 1) {
+      const manifest = await this.#loadManifest();
 
-    // A pending (unpublished) intent under this batch id?
-    const intent = await this.#storage.getPrepare(batch.batchId);
-    if (intent) {
-      if (intent.contentHash !== contentHash) {
+      // Already published under this batch id?
+      if (Object.hasOwn(manifest.batches, batch.batchId)) {
+        const existing = await this.#storage.getSegment(
+          manifest.batches[batch.batchId]
+        );
+        if (existing && existing.contentHash === contentHash) {
+          // Identical retransmission: hand back the original receipt, append nothing.
+          return { status: "duplicate", receipt: existing.receipt };
+        }
+        // Different content under a published id: keep existing evidence, report.
         const conflict = {
-          reason: "pending-intent-content-mismatch",
+          reason: "published-content-mismatch",
           batchId: batch.batchId,
           incomingContentHash: contentHash,
-          existingContentHash: intent.contentHash,
-          existingReceipt: null,
+          existingContentHash: existing?.contentHash ?? null,
+          existingReceipt: existing?.receipt ?? null,
           at: new Date().toISOString(),
         };
         await this.#recordConflict(conflict);
         return { status: "conflict", conflict };
       }
-      // Same content: resume the established intent, do not start a new one.
-      return this.#fulfillIntent(intent, manifest, { persistIntent: false });
-    }
 
-    // New batch: sequence numbers must extend the sealed record monotonically.
-    const { lastSeqEnd } = await this.#headState(manifest);
-    if (lastSeqEnd !== null && events[0].seq <= lastSeqEnd) {
-      return {
-        status: "rejected",
-        error: {
-          code: "sequence-regression",
-          detail: `first seq ${events[0].seq} must be greater than the sealed last seq ${lastSeqEnd}`,
-        },
+      // A pending (unpublished) intent under this batch id?
+      const intent = await this.#storage.getPrepare(batch.batchId);
+      if (intent) {
+        if (intent.contentHash !== contentHash) {
+          const conflict = {
+            reason: "pending-intent-content-mismatch",
+            batchId: batch.batchId,
+            incomingContentHash: contentHash,
+            existingContentHash: intent.contentHash,
+            existingReceipt: null,
+            at: new Date().toISOString(),
+          };
+          await this.#recordConflict(conflict);
+          return { status: "conflict", conflict };
+        }
+        if (intent.prevDigest === manifest.head) {
+          // Same content, predecessor still current: resume the established
+          // intent, do not start a new one.
+          const outcome = await this.#fulfillIntent(intent, manifest, {
+            persistIntent: false,
+          });
+          if (outcome.status !== "retry") return outcome;
+          continue; // lost the manifest race: re-evaluate against the new head
+        }
+        // The recorded intent's predecessor is stale — another connection
+        // committed since it was written. Re-establish the same batch as a
+        // fresh intent bound to the actual head below; the stale prepared
+        // segment stays behind as orphan evidence and is never linked.
+      }
+
+      // New batch: sequence numbers must extend the sealed record monotonically.
+      const { lastSeqEnd } = await this.#headState(manifest);
+      if (lastSeqEnd !== null && events[0].seq <= lastSeqEnd) {
+        return {
+          status: "rejected",
+          error: {
+            code: "sequence-regression",
+            detail: `first seq ${events[0].seq} must be greater than the sealed last seq ${lastSeqEnd}`,
+          },
+        };
+      }
+
+      const newIntent = {
+        batchId: batch.batchId,
+        contentHash,
+        events,
+        prevDigest: manifest.head,
+        expectedDigest: await segmentDigestOf(manifest.head, events),
+        createdAt: intent?.createdAt ?? Date.now(),
       };
+      const outcome = await this.#fulfillIntent(newIntent, manifest, {
+        persistIntent: true,
+      });
+      if (outcome.status !== "retry") return outcome;
     }
-
-    const newIntent = {
-      batchId: batch.batchId,
-      contentHash,
-      events,
-      prevDigest: manifest.head,
-      expectedDigest: await segmentDigestOf(manifest.head, events),
-      createdAt: Date.now(),
+    return {
+      status: "blocked",
+      error: {
+        code: "manifest-contention",
+        detail:
+          "the active manifest kept switching under concurrent submits; the batch was not sealed",
+      },
     };
-    return this.#fulfillIntent(newIntent, manifest, { persistIntent: true });
   }
 
   // ---- persistence protocol --------------------------------------------
@@ -214,7 +258,11 @@ export class SealEngine {
     await this.#storage.putSegment(segment);
     await this.#maybeCrash("afterSegment");
 
-    // Stage 3: switch the active manifest.
+    // Stage 3: switch the active manifest — a compare-and-swap guarded by
+    // the version this intent was built against. If another connection
+    // switched the manifest first, nothing is published; the caller
+    // re-evaluates the batch against the new head instead of reporting a
+    // stale chain as sealed.
     const nextManifest = {
       ...manifest,
       segmentIds: [...manifest.segmentIds, segment.digest],
@@ -222,7 +270,13 @@ export class SealEngine {
       head: segment.digest,
       version: manifest.version + 1,
     };
-    await this.#storage.putManifest(nextManifest);
+    const switched = await this.#storage.switchManifest(
+      nextManifest,
+      manifest.version
+    );
+    if (!switched) {
+      return { status: "retry" };
+    }
     await this.#maybeCrash("afterManifest");
 
     // Best-effort intent cleanup; a leftover fulfilled intent is swept by
