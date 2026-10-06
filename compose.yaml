@@ -1,0 +1,33 @@
+name: glider-seal
+
+services:
+  # Serves the offline review page and the health response on a
+  # configurable host port (HOST_PORT, default 8080).
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment:
+      PORT: "8080"
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  # Runs once and exits: rule tests, interrupt-recovery drills, frontend
+  # build check and page/health HTTP smoke. Result is reported via its
+  # exit code — run with: docker compose up --exit-code-from verify
+  verify:
+    build:
+      context: .
+      dockerfile: verify/Dockerfile
+    environment:
+      WEB_URL: "http://web:8080"
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"

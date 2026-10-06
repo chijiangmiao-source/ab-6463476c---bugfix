@@ -1,0 +1,7 @@
+{
+  "name": "glider-seal-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared sealing-chain engine: canonical UTF-8 encoding, SHA-256 hash chain, prepare/segment/manifest persistence protocol and crash recovery."
+}

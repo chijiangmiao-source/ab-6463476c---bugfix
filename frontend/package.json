@@ -1,0 +1,13 @@
+{
+  "name": "glider-seal-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline review page for the deep-space glider sealing chain",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

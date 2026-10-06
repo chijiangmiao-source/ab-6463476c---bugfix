@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>深空滑翔器 · 离线复核封存链</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>深空滑翔器 · 离线复核封存链</h1>
+        <p class="subtitle">
+          失联窗口姿态事件暂存 → SHA-256 哈希链封存 → IndexedDB 三段式持久化（准备意图 / 不可变段 / 活动清单）
+        </p>
+      </header>
+
+      <main>
+        <section class="panel">
+          <h2>提交批次</h2>
+          <form id="submit-form">
+            <label>
+              批次标识（稳定 ID，重传同标识同内容将返回原回执）
+              <input id="batch-id" type="text" placeholder="BATCH-2026-10-05-01" required />
+            </label>
+            <label>
+              事件（每行一条：<code>序号|文本载荷</code>，序号严格递增，至多 24 条）
+              <textarea id="events-input" rows="6" placeholder="101|姿态机动开始&#10;102|太阳帆板展开确认"></textarea>
+            </label>
+            <div class="row">
+              <button type="submit">提交并封存</button>
+              <button type="button" id="fill-demo">填入示例</button>
+            </div>
+          </form>
+          <h3>提交结果 / 回执</h3>
+          <pre id="submit-result" class="output">尚未提交</pre>
+        </section>
+
+        <section class="panel">
+          <h2>故障演练</h2>
+          <p>
+            选择中断点后执行：引擎在对应阶段持久化完成后立即模拟崩溃，随后关闭并重开
+            IndexedDB 连接执行恢复扫描。也可以随时直接重开页面触发真实恢复。
+          </p>
+          <div class="row">
+            <select id="drill-stage"></select>
+            <button id="run-drill" type="button">执行故障演练</button>
+            <button id="reload-page" type="button">重开页面（真实恢复）</button>
+          </div>
+          <pre id="drill-log" class="output">尚未执行演练</pre>
+        </section>
+
+        <section class="panel wide">
+          <h2>已封存记录（活动清单指向且校验连续的段）</h2>
+          <p class="meta-line">
+            链头摘要：<span id="chain-head" class="mono">—</span> · 清单版本：<span id="chain-version">—</span> · 段数：<span id="chain-count">—</span>
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>批次标识</th>
+                <th>序号范围</th>
+                <th>前驱摘要</th>
+                <th>段摘要</th>
+                <th>恢复动作</th>
+                <th>回执摘要</th>
+              </tr>
+            </thead>
+            <tbody id="chain-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>恢复扫描</h2>
+          <p class="meta-line">最近一次打开时间：<span id="recovery-at">—</span></p>
+          <h3>恢复动作</h3>
+          <ul id="recovery-actions"></ul>
+          <h3>首个阻断证据</h3>
+          <pre id="first-blocking" class="output">—</pre>
+        </section>
+
+        <section class="panel">
+          <h2>冲突记录（同标识不同内容，既有证据保留）</h2>
+          <ul id="conflict-list"></ul>
+        </section>
+      </main>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "glider-seal-verify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Run-once verifier: rule tests, recovery drills, frontend build, HTTP smoke",
+  "scripts": {
+    "verify": "node run.js"
+  }
+}

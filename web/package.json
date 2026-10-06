@@ -1,0 +1,10 @@
+{
+  "name": "glider-seal-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static page server with /health for the glider sealing chain",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
